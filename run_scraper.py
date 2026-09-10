@@ -29,7 +29,7 @@ from scrapers.tendernotices import TenderNoticesScraper
 from scrapers.srilankatender import SriLankaTenderScraper
 from scrapers.smarttenders import SmartTendersScraper
 from scrapers.etenders import ETendersScraper
-from deduplicator import find_matching_tender
+from deduplicator import build_index, find_matching_tender_fast, index_add
 import hashlib
 
 def run_all_scrapers(priority: int = None):
@@ -59,6 +59,12 @@ def run_all_scrapers(priority: int = None):
     # Load existing tenders in memory for duplicate comparison (full history by default)
     existing_tenders = get_all_existing_tenders(limit=config.DEDUP_LOAD_LIMIT)
     print(f"📋 Loaded {len(existing_tenders)} existing tenders for duplicate detection\n")
+
+    # Build an index for fast duplicate detection (O(1) exact + pruned fuzzy).
+    # This is essential for large datasets (e.g. 40k+ tenders) where the plain
+    # O(n^2) comparison would take many hours.
+    existing_by_id = {e['source_id']: e for e in existing_tenders}
+    dedup_index = build_index(existing_tenders)
 
     # Custom scrapers for sites with special structures
     custom_scrapers = {
@@ -112,36 +118,37 @@ def run_all_scrapers(priority: int = None):
             dup_count = 0
 
             for tender in tenders:
-                # Check if this tender is a duplicate (cross-site)
-                duplicate_id = find_matching_tender(tender, existing_tenders)
+                # Check if this tender is a duplicate (cross-site), using the
+                # indexed fast path that scales to large datasets.
+                duplicate_id = find_matching_tender_fast(tender, dedup_index)
 
-                if duplicate_id:
+                if duplicate_id and duplicate_id in existing_by_id:
+                    existing = existing_by_id[duplicate_id]
                     # This is a cross-site duplicate, add to sources of existing tender
-                    for existing in existing_tenders:
-                        if existing['source_id'] == duplicate_id:
-                            add_duplicate_source(
-                                master_group_id=existing['master_group_id'],
-                                source_site_id=tender['source_site_id'],
-                                source_id=tender['source_id'],
-                                source_url=tender['source_url']
-                            )
-                            # Also insert as alias record
-                            insert_tender(
-                                tender,
-                                master_group_id=existing['master_group_id'],
-                                is_primary=0,
-                                duplicate_of=duplicate_id
-                            )
-                            dup_count +=1
-                            break
+                    add_duplicate_source(
+                        master_group_id=existing['master_group_id'],
+                        source_site_id=tender['source_site_id'],
+                        source_id=tender['source_id'],
+                        source_url=tender['source_url']
+                    )
+                    # Also insert as alias record
+                    insert_tender(
+                        tender,
+                        master_group_id=existing['master_group_id'],
+                        is_primary=0,
+                        duplicate_of=duplicate_id
+                    )
+                    dup_count += 1
                 else:
                     # New unique tender
                     master_id = hashlib.md5(tender['source_url'].encode()).hexdigest()[:12]
                     if insert_tender(tender, master_group_id=master_id, is_primary=1):
-                        new_count +=1
+                        new_count += 1
                         tender['master_group_id'] = master_id
                         tender['is_primary'] = 1
                         existing_tenders.append(tender)
+                        existing_by_id[tender['source_id']] = tender
+                        index_add(dedup_index, tender)
 
             total_found += scraper.tenders_found
             total_new += new_count
