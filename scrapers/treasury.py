@@ -11,21 +11,29 @@ class TreasuryScraper(BaseScraper):
     def scrape(self) -> List[Dict]:
         tenders = []
 
-        # Treasury is a Next.js site — all tender data is embedded in __NEXT_DATA__ JSON
-        for page in range(1, 4):  # Scrape latest 3 pages
+        # Treasury is a Next.js site — all tender data is embedded in __NEXT_DATA__ JSON.
+        # Paginate through ALL pages (old + new) until the source runs out of notices.
+        from config import MAX_PAGES_PER_SITE
+        max_pages = MAX_PAGES_PER_SITE or 100000  # safety cap
+        page = 1
+
+        while page <= max_pages:
             soup = self.fetch_page(f"{self.base_url}/procurement/procurement-notices?page={page}")
             if not soup:
-                continue
+                break
 
             nd = soup.find('script', id='__NEXT_DATA__')
             if not nd:
-                continue
+                break
 
             try:
                 data = json.loads(nd.string)
                 notices = data.get('props', {}).get('pageProps', {}).get('notices', [])
             except Exception:
-                continue
+                break
+
+            if not notices:
+                break  # no more notices
 
             self.tenders_found += len(notices)
 
@@ -80,5 +88,7 @@ class TreasuryScraper(BaseScraper):
                     "status": "open" if notice.get('status') else "closed"
                 }
                 tenders.append(tender)
+
+            page += 1
 
         return tenders

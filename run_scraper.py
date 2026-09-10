@@ -16,6 +16,7 @@ except Exception:
 
 from datetime import datetime
 
+import config
 from database import init_db, insert_tender, log_scrape_run, mark_expired_tenders, delete_expired_tenders, get_all_existing_tenders, add_duplicate_source
 from sources import get_sources_by_priority
 from scrapers import ALL_SCRAPERS
@@ -41,18 +42,22 @@ def run_all_scrapers(priority: int = None):
     init_db()
     print("✅ Local database ready")
 
-    # Auto-close expired tenders (closing date passed)
+    # Auto-close expired tenders (closing date passed) - only updates status, data is kept
     closed = mark_expired_tenders()
     if closed > 0:
         print(f"⏱️  Marked {closed} expired tenders as closed")
 
-    # Auto-DELETE tenders closed for more than 20 days (keep database clean)
-    deleted = delete_expired_tenders(days_after_closing=20)
-    if deleted > 0:
-        print(f"🗑️  Auto-deleted {deleted} tenders closed for >20 days\n")
+    # Keep ALL historical data by default. Old/closed tenders are only purged if
+    # DELETE_CLOSED_AFTER_DAYS is explicitly set in config (or the env var).
+    if config.DELETE_CLOSED_AFTER_DAYS:
+        deleted = delete_expired_tenders(days_after_closing=config.DELETE_CLOSED_AFTER_DAYS)
+        if deleted > 0:
+            print(f"🗑️  Deleted {deleted} tenders closed for >{config.DELETE_CLOSED_AFTER_DAYS} days\n")
+    else:
+        print("💾 Keeping ALL historical tender data (old + new) — deletion is disabled\n")
 
-    # Load existing tenders in memory for duplicate comparison (low memory: ~5MB for 10k tenders)
-    existing_tenders = get_all_existing_tenders()
+    # Load existing tenders in memory for duplicate comparison (full history by default)
+    existing_tenders = get_all_existing_tenders(limit=config.DEDUP_LOAD_LIMIT)
     print(f"📋 Loaded {len(existing_tenders)} existing tenders for duplicate detection\n")
 
     # Custom scrapers for sites with special structures

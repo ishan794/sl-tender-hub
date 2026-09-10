@@ -90,11 +90,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_all_existing_tenders(limit: int = 5000) -> List[Dict]:
-    """Get all primary (non-duplicate) tenders for duplicate comparison"""
+def get_all_existing_tenders(limit: int = None) -> List[Dict]:
+    """Get all primary (non-duplicate) tenders for duplicate comparison.
+
+    By default loads the ENTIRE history (old + new) so duplicates can be detected
+    across the full dataset. Pass `limit` to bound memory usage on huge databases.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM tenders WHERE is_primary = 1 ORDER BY published_date DESC LIMIT ?', (limit,))
+    query = 'SELECT * FROM tenders WHERE is_primary = 1 ORDER BY published_date DESC'
+    params = []
+    if limit:
+        query += ' LIMIT ?'
+        params.append(limit)
+    cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
     results = []
@@ -330,8 +339,9 @@ def mark_expired_tenders():
 
 def delete_expired_tenders(days_after_closing: int = 20):
     """
-    Automatically DELETE tenders that have been closed for more than `days_after_closing` days (default 20 days).
-    This keeps database size small and only shows relevant/recent tenders.
+    OPTIONAL cleanup: DELETE tenders that have been closed for more than
+    `days_after_closing` days. This is NOT called by default — by default the hub
+    keeps ALL historical data. Only call this if you explicitly want old data purged.
     Also deletes related source mappings for deleted tenders.
     Returns number of tenders deleted.
     """

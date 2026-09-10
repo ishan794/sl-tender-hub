@@ -101,9 +101,14 @@ class TenderNoticesScraper(BaseScraper):
                     return org
         return "Government of Sri Lanka"
 
-    def scrape(self, max_pages: int = 20) -> List[Dict]:
+    def scrape(self, max_pages: int = None) -> List[Dict]:
         tenders = []
         seen_urls = set()
+
+        # Collect the FULL history: paginate until no more tender listings appear.
+        if max_pages is None:
+            from config import MAX_PAGES_PER_SITE
+            max_pages = MAX_PAGES_PER_SITE or 100000  # safety cap
 
         # Scrape through pages of tenders-sri-lanka
         for page in range(1, max_pages + 1):

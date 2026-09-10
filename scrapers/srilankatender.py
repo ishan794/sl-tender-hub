@@ -35,18 +35,21 @@ class SriLankaTenderScraper(BaseScraper):
 
     def scrape(self) -> List[Dict]:
         tenders = []
-        max_pages = 5
-        
-        for page in range(1, max_pages + 1):
+        # Collect the FULL history: paginate until no more tender cards are found.
+        from config import MAX_PAGES_PER_SITE
+        max_pages = MAX_PAGES_PER_SITE or 100000  # safety cap
+        page = 1
+
+        while page <= max_pages:
             url = f"{self.base_url}/tenders.php?page={page}" if page > 1 else f"{self.base_url}/tenders.php"
             soup = self.fetch_page(url)
             if not soup:
                 break
-                
+
             cards = soup.find_all('div', class_='tender-card')
             if not cards:
                 break
-                
+
             page_found = 0
             for c in cards:
                 try:
@@ -85,7 +88,17 @@ class SriLankaTenderScraper(BaseScraper):
                     org = m_org.group(1).strip() if m_org else "Government of Sri Lanka"
                     
                     category = self.infer_category(title + " " + txt)
-                    
+
+                    # Keep old/closed tenders too — mark status from the deadline
+                    status = "open"
+                    if closing_date:
+                        try:
+                            from datetime import date
+                            cd = date.fromisoformat(str(closing_date)[:10])
+                            status = "closed" if cd < date.today() else "open"
+                        except Exception:
+                            status = "open"
+
                     tenders.append({
                         'source_site_id': self.site_id,
                         'source_id': source_id,
@@ -109,15 +122,17 @@ class SriLankaTenderScraper(BaseScraper):
                         'pre_bid_meeting': None,
                         'document_links': [],
                         'source_url': source_url,
-                        'status': 'open'
+                        'status': status
                     })
                     page_found += 1
                 except Exception as e:
                     continue
-                    
+
             if page_found == 0:
                 break
-                
+
+            page += 1
+
         self.tenders_found = len(tenders)
-        print(f"[{self.site_name}] Scraped {len(tenders)} live tenders")
+        print(f"[{self.site_name}] Scraped {len(tenders)} tenders (full history)")
         return tenders
