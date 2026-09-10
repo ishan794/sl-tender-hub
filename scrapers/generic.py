@@ -40,6 +40,31 @@ EMAIL_PATTERN = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 PHONE_PATTERN = r'(?:\+94|0)?[0-9]{9,10}'
 CURRENCY_PATTERN = r'(USD|LKR|Rs\.?|\$|\u0DBB\u0DD4)'
 
+# Category rules, in priority order. Shared by every scraper (public sites and
+# login-protected sites) so the same notice gets the same category everywhere.
+# Important: IT / specialised categories are checked BEFORE goods/construction.
+CATEGORY_RULES = (
+    ("IT", ['it ', 'software', 'hardware', 'system', 'network', 'website', 'digital', 'server', 'laptop', 'computer', 'software development']),
+    ("health", ['health', 'medical', 'medicine', 'hospital', 'pharmaceutical', 'drug', 'vaccine']),
+    ("agriculture", ['agriculture', 'seed', 'fertilizer', 'livestock', 'fisheries', 'paddy']),
+    ("energy", ['energy', 'electricity', 'power', 'solar', 'transformer', 'generator', 'electric']),
+    ("education", ['education', 'university', 'school', 'training', 'book', 'scholarship']),
+    ("transport", ['transport', 'bus', 'van', 'lorry', 'railway', 'vehicle']),
+    ("services", ['consult', 'service', 'maintenance', 'security', 'cleaning', 'insurance', 'audit', 'transport service', 'catering']),
+    ("construction", ['construction', 'work', 'civil', 'building', 'road', 'irrigation', 'asphalt', 'building construction']),
+    ("goods", ['supply', 'goods', 'vehicle', 'equipment', 'machine', 'material', 'printer', 'furniture', 'stationery', 'fuel', 'chemical']),
+)
+
+
+def categorize_text(text: str) -> str:
+    """Map free text to one of config.CATEGORIES (first matching rule wins)."""
+    lowered = (text or "").lower()
+    for category, keywords in CATEGORY_RULES:
+        if any(keyword in lowered for keyword in keywords):
+            return category
+    return "other"
+
+
 class GenericScraper(BaseScraper):
     def __init__(self, source_id: str, name: str, base_url: str, tender_url: str, strategy: str = "generic_wp"):
         super().__init__()
@@ -68,27 +93,7 @@ class GenericScraper(BaseScraper):
         return True
 
     def categorize(self, text: str) -> str:
-        text = text.lower()
-        # Important: Check IT/services/specialized categories BEFORE goods/construction
-        if any(k in text for k in ['it ', 'software', 'hardware', 'system', 'network', 'website', 'digital', 'server', 'laptop', 'computer', 'software development']):
-            return "IT"
-        elif any(k in text for k in ['health', 'medical', 'medicine', 'hospital', 'pharmaceutical', 'drug', 'vaccine']):
-            return "health"
-        elif any(k in text for k in ['agriculture', 'seed', 'fertilizer', 'livestock', 'fisheries', 'paddy']):
-            return "agriculture"
-        elif any(k in text for k in ['energy', 'electricity', 'power', 'solar', 'transformer', 'generator', 'electric']):
-            return "energy"
-        elif any(k in text for k in ['education', 'university', 'school', 'training', 'book', 'scholarship']):
-            return "education"
-        elif any(k in text for k in ['transport', 'bus', 'van', 'lorry', 'railway', 'vehicle']):
-            return "transport"
-        elif any(k in text for k in ['consult', 'service', 'maintenance', 'security', 'cleaning', 'insurance', 'audit', 'transport service', 'catering']):
-            return "services"
-        elif any(k in text for k in ['construction', 'work', 'civil', 'building', 'road', 'irrigation', 'asphalt', 'building construction']):
-            return "construction"
-        elif any(k in text for k in ['supply', 'goods', 'vehicle', 'equipment', 'machine', 'material', 'printer', 'furniture', 'stationery', 'fuel', 'chemical']):
-            return "goods"
-        return "other"
+        return categorize_text(text)
 
     def extract_details_from_page(self, soup: BeautifulSoup, full_text: str) -> Dict:
         """Extract all detailed tender fields from the page content"""

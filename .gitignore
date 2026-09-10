@@ -1,0 +1,17 @@
+# --- secrets: NEVER commit these -----------------------------------------
+.env
+.env.*
+!.env.example
+.sessions/
+*.session.json
+
+# --- generated data ------------------------------------------------------
+data/
+uploads/
+*.log
+
+# --- python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/

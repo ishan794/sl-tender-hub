@@ -5,6 +5,8 @@ Priority levels: 1 = highest (frequent updates, most tenders), 2 = medium, 3 = l
 from dataclasses import dataclass
 from typing import Optional
 
+from credentials import MY_SITE  # link + login e-mail + password (see credentials.py)
+
 @dataclass
 class TenderSource:
     id: str
@@ -108,6 +110,18 @@ ALL_SOURCES = [
     TenderSource("etenders", "eTenders.lk", "https://etenders.lk", "https://api.etenders.lk", "private_aggregator", 1, "etenders"),
     TenderSource("tendernotices", "TenderNotices.lk", "https://www.tendernotices.lk", "https://www.tendernotices.lk/tenders-sri-lanka", "private_aggregator", 1, "tendernotices"),
     TenderSource("un_srilanka", "UN Sri Lanka Government Tenders", "https://www.un.int/srilanka", "https://www.un.int/srilanka/srilanka/government-tenders", "aggregator", 3, "generic_wp"),
+
+    # ===== Login-protected (private) portals =====
+    # The link + login e-mail + password are NOT stored here - they live in
+    # credentials.py (or the .env file). Fill the pointers there and this
+    # source starts working automatically.
+    TenderSource(
+        "my_tender_site",
+        MY_SITE.site_name or "My Tender Site (login required)",
+        MY_SITE.site_url or "https://configure-in-credentials.py",
+        MY_SITE.list_url or None,
+        "private_portal", 1, "authenticated",
+    ),
 ]
 
 def get_sources_by_priority(priority: int = None):

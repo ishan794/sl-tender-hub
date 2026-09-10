@@ -29,6 +29,7 @@ from scrapers.tendernotices import TenderNoticesScraper
 from scrapers.srilankatender import SriLankaTenderScraper
 from scrapers.smarttenders import SmartTendersScraper
 from scrapers.etenders import ETendersScraper
+from scrapers.my_tender_site import MyTenderSiteScraper
 from deduplicator import build_index, find_matching_tender_fast, index_add
 import hashlib
 
@@ -76,6 +77,8 @@ def run_all_scrapers(priority: int = None):
         "srilankatender": SriLankaTenderScraper,
         "smarttenders": SmartTendersScraper,
         "etenders": ETendersScraper,
+        # Login-protected portal - link/e-mail/password come from credentials.py
+        "my_tender_site": MyTenderSiteScraper,
     }
 
     sources = get_sources_by_priority(priority)
@@ -86,6 +89,18 @@ def run_all_scrapers(priority: int = None):
     skipped_sites = []
 
     for source in sources:
+        # Sites behind a login are skipped (not failed) until the pointers in
+        # credentials.py / .env are filled in - so a fresh checkout still runs.
+        scraper_cls = custom_scrapers.get(source.id)
+        if scraper_cls is not None and getattr(scraper_cls, "requires_credentials", False):
+            if not scraper_cls.credentials_ready():
+                creds = scraper_cls.default_credentials()
+                missing = ", ".join(creds.missing) if creds else "site link + login"
+                skipped_sites.append(source.name)
+                log_scrape_run(source.id, "skipped", error_message=f"Login details missing: {missing}")
+                print(f"⏭️  {source.name}: skipped - fill in credentials.py / .env ({missing})")
+                continue
+
         # Select appropriate scraper
         if source.id in custom_scrapers:
             scraper = custom_scrapers[source.id]()

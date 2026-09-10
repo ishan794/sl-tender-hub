@@ -11,6 +11,27 @@ DB_PATH = os.getenv("TENDER_DB_PATH", BASE_DIR / "tenders.db")
 # Folder where uploaded notice images (manual submissions) are stored
 UPLOAD_DIR = Path(os.getenv("TENDER_UPLOAD_DIR", BASE_DIR / "uploads"))
 
+# ---------------------------------------------------------------------------
+# Login-protected (private) tender portals
+# A site that needs an e-mail + password is configured in credentials.py
+# (or in the .env file). Nothing secret is stored in this file.
+# ---------------------------------------------------------------------------
+
+# Saved login sessions (cookies) are kept here so we do not have to log in on
+# every single run. This folder is git-ignored — never commit it.
+SESSION_DIR = Path(os.getenv("TENDER_SESSION_DIR", BASE_DIR / ".sessions"))
+
+# Downloaded tender documents (PDF/DOC/XLS) go here when DOWNLOAD_DOCUMENTS=1
+DOWNLOAD_DIR = Path(os.getenv("TENDER_DOWNLOAD_DIR", BASE_DIR / "data" / "documents"))
+DOWNLOAD_DOCUMENTS = os.getenv("DOWNLOAD_DOCUMENTS", "0") not in ("0", "false", "False")
+
+# Debug snapshots written by check_login.py (list page HTML/JSON of your site)
+DEBUG_DIR = Path(os.getenv("TENDER_DEBUG_DIR", BASE_DIR / "data" / "debug"))
+
+# Login sites are slower than public ones, so allow a longer timeout + retries
+AUTH_REQUEST_TIMEOUT = int(os.getenv("AUTH_REQUEST_TIMEOUT", "25"))
+AUTH_MAX_RETRIES = int(os.getenv("AUTH_MAX_RETRIES", "3"))
+
 # Scraper settings
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 REQUEST_TIMEOUT = 8  # seconds - reduced for faster runs
