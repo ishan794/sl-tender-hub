@@ -60,9 +60,23 @@ class SLPostScraper(BaseScraper):
                     if date_match:
                         published_date = f"{date_match.group(1)}-{date_match.group(2)}-01"
 
+                # Build a clean title: drop leading nav/menu boilerplate and keep the
+                # actual notice text starting from the "Invitation for Bids" marker.
+                clean_title = re.sub(r'\s+', ' ', p_text).strip()
+                marker = re.search(
+                    r'(Invitation\s+for\s+Bids|Invitation\s+of\s+Bids|IFB|Invitation\s+of\s+Quotations|Invitation\s+for\s+Quotations)',
+                    clean_title, re.IGNORECASE
+                )
+                if marker:
+                    clean_title = clean_title[marker.start():]
+                # Strip any trailing "click here / download" cruft
+                clean_title = re.sub(r'\s*(?:-|:)?\s*(?:click here|download|here)\s*$', '', clean_title, flags=re.IGNORECASE).strip()
+                if len(clean_title) < 20:
+                    continue
+
                 # Categorize
                 category = "other"
-                p_lower = p_text.lower()
+                p_lower = clean_title.lower()
                 if any(k in p_lower for k in ['it equipment', 'printer', 'barcode', 'computer', 'software']):
                     category = "IT"
                 elif any(k in p_lower for k in ['machine', 'stamp', 'supply', 'deliver']):
@@ -71,7 +85,7 @@ class SLPostScraper(BaseScraper):
                 tender = {
                     "source_site_id": self.site_id,
                     "source_id": f"slpost_{title_hash}",
-                    "title": p_text[:500],
+                    "title": clean_title[:500],
                     "organization": "Department of Posts, Sri Lanka",
                     "published_date": published_date,
                     "location": "Sri Lanka",

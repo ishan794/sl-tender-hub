@@ -3,10 +3,29 @@ import json
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 
+# Labeled date patterns used to pull the closing date out of the notice text
+# (Treasury's list JSON has publishedOn but not the closing date).
+CLOSING_DATE_PATTERNS = [
+    r'(?:closing|close)\s*(?:date|on)?\s*:?\s*(\d{1,2}[-/.\s]\d{1,2}[-/.\s]\d{2,4})',
+    r'(?:deadline|submission\s*deadline)\s*:?\s*(\d{1,2}[-/.\s]\d{1,2}[-/.\s]\d{2,4})',
+    r'(?:bid\s*(?:submission|closing))\s*:?\s*(\d{1,2}[-/.\s]\d{1,2}[-/.\s]\d{2,4})',
+]
+
 class TreasuryScraper(BaseScraper):
     site_id = "treasury"
     site_name = "Ministry of Finance Treasury"
     base_url = "https://www.treasury.gov.lk"
+
+    def _extract_closing_date(self, notice: Dict) -> str:
+        """Try dedicated fields first, then fall back to searching the notice text."""
+        for key in ['closingOn', 'closingDate', 'closing_date', 'deadline', 'submissionDeadline', 'closedOn']:
+            value = notice.get(key)
+            if value:
+                parsed = self.parse_date(str(value))
+                if parsed:
+                    return parsed
+        text = " ".join(str(notice.get(k, '')) for k in ['subtitle', 'description'])
+        return self.extract_date_from_text(text, CLOSING_DATE_PATTERNS)
 
     def scrape(self) -> List[Dict]:
         tenders = []
@@ -47,7 +66,7 @@ class TreasuryScraper(BaseScraper):
                 full_title = f"{title} - {subtitle}: {description}" if subtitle else f"{title}: {description}"
 
                 published_date = self.parse_date(notice.get('publishedOn'))
-                closing_date = None  # Not directly in list response
+                closing_date = self._extract_closing_date(notice)
 
                 # Extract document links
                 doc_links = []
@@ -58,6 +77,10 @@ class TreasuryScraper(BaseScraper):
                     elif link:
                         # Attachment UUID — use the direct download URL pattern
                         doc_links.append(f"{self.base_url}/api/attachments/{link}")
+
+                # If closing date is still missing, extract it from the full notice text
+                if not closing_date:
+                    closing_date = self.extract_date_from_text(full_title + " " + description, CLOSING_DATE_PATTERNS)
 
                 # Categorize based on title/description
                 full_text_lower = (full_title + " " + description).lower()

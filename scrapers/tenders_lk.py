@@ -86,6 +86,19 @@ class TendersLKScraper(BaseScraper):
                     return mapped
         return "other"
 
+    # Field-name candidates for published/closing dates. Tenders.lk's API schema
+    # has varied over time, so we check every plausible key instead of guessing one.
+    PUBLISHED_KEYS = [
+        'published_date', 'publishedDate', 'published_at', 'publishedAt',
+        'publish_date', 'publishDate', 'publish_at', 'publishAt',
+        'created_at', 'createdAt', 'created_date', 'createdDate',
+        'posted_date', 'postedDate', 'post_date', 'date',
+    ]
+    CLOSING_KEYS = [
+        'closing_date', 'closingDate', 'closed_date', 'closedDate',
+        'due_date', 'dueDate', 'deadline', 'end_date', 'endDate',
+    ]
+
     def extract_organization_from_title(self, title: str) -> str:
         """Try to extract organization name from tender title"""
         # Common patterns: "Ministry of X - Tender title", "Ceylon Electricity Board: IFB for..."
@@ -122,7 +135,11 @@ class TendersLKScraper(BaseScraper):
                 self.tenders_found += len(items)
 
                 for item in items:
-                    closing_date = item.get('closing_date')
+                    # Robust date extraction — try every known field name so the
+                    # collected dates actually match what Tenders.lk shows.
+                    closing_date = self.pick_date(item, self.CLOSING_KEYS) or item.get('closing_date')
+                    published_date = self.pick_date(item, self.PUBLISHED_KEYS)
+
                     title = item.get('title', '').strip()
                     # Skip empty/supplier registration only notices
                     if not title or len(title) < 10:
@@ -130,7 +147,6 @@ class TendersLKScraper(BaseScraper):
                     if 'supplier registration' in title.lower():
                         continue
 
-                    published_date = self.parse_date(item.get('published_date') or item.get('created_at'))
                     description = item.get('description', '')
                     # Clean HTML from description
                     if description:
