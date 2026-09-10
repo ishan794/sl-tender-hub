@@ -1,0 +1,13 @@
+# Core scraper dependencies (~5MB, <300MB peak RAM usage)
+requests==2.32.3
+beautifulsoup4==4.12.3
+python-dateutil==2.9.0.post0
+cloudscraper==1.2.71
+
+# API Server (adds ~15MB, idle <50MB RAM)
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.0
+
+# Optional: MCP server for AI integration (adds ~2MB, <15MB idle RAM)
+# mcp[cli]==1.2.0
