@@ -51,6 +51,18 @@ def init_db():
     )
     ''')
 
+    # Migrations for databases created before these columns existed.
+    # SQLite's CREATE TABLE IF NOT EXISTS does NOT add columns to an existing table,
+    # so we add new columns here explicitly.
+    for column, column_type in [
+        ("notice_image", "TEXT"),  # photo/scan of the notice (manual submissions)
+        ("source_name", "TEXT"),   # human-readable source, e.g. "Sunday Observer"
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE tenders ADD COLUMN {column} {column_type}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     # Cross-site source links (one tender appearing on multiple sites)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS tender_sources (
@@ -90,11 +102,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_all_existing_tenders(limit: int = 5000) -> List[Dict]:
-    """Get all primary (non-duplicate) tenders for duplicate comparison"""
+def get_all_existing_tenders(limit: int = None) -> List[Dict]:
+    """Get all primary (non-duplicate) tenders for duplicate comparison.
+
+    By default loads the ENTIRE history (old + new) so duplicates can be detected
+    across the full dataset. Pass `limit` to bound memory usage on huge databases.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM tenders WHERE is_primary = 1 ORDER BY published_date DESC LIMIT ?', (limit,))
+    query = 'SELECT * FROM tenders WHERE is_primary = 1 ORDER BY published_date DESC'
+    params = []
+    if limit:
+        query += ' LIMIT ?'
+        params.append(limit)
+    cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
     results = []
@@ -119,8 +140,9 @@ def insert_tender(tender_data: Dict, master_group_id: str = None, is_primary: bo
             closing_date, location, category, estimated_value, currency, description,
             eligibility, bid_bond, contact_person, contact_email, contact_phone,
             collection_address, submission_address, document_fee, pre_bid_meeting,
-            document_links, source_url, status, is_primary, duplicate_of
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            document_links, source_url, status, is_primary, duplicate_of,
+            notice_image, source_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             tender_data['source_site_id'],
             tender_data['source_id'],
@@ -147,7 +169,9 @@ def insert_tender(tender_data: Dict, master_group_id: str = None, is_primary: bo
             tender_data['source_url'],
             tender_data.get('status', 'open'),
             is_primary,
-            duplicate_of
+            duplicate_of,
+            tender_data.get('notice_image'),
+            tender_data.get('source_name')
         ))
 
         # Add source mapping
@@ -163,6 +187,18 @@ def insert_tender(tender_data: Dict, master_group_id: str = None, is_primary: bo
         return False
     finally:
         conn.close()
+
+def insert_submitted_tender(tender_data: Dict) -> Optional[str]:
+    """
+    Insert a manually submitted tender (dates already validated by the API layer).
+    Returns the new master_group_id on success, or None if the tender already exists.
+    """
+    import hashlib
+    master_id = hashlib.md5(tender_data['source_url'].encode()).hexdigest()[:12]
+    if insert_tender(tender_data, master_group_id=master_id, is_primary=1):
+        return master_id
+    return None
+
 
 def add_duplicate_source(master_group_id: str, source_site_id: str, source_id: str, source_url: str):
     """Register that an existing tender also appears on another site (cross-site duplicate)"""
@@ -330,8 +366,9 @@ def mark_expired_tenders():
 
 def delete_expired_tenders(days_after_closing: int = 20):
     """
-    Automatically DELETE tenders that have been closed for more than `days_after_closing` days (default 20 days).
-    This keeps database size small and only shows relevant/recent tenders.
+    OPTIONAL cleanup: DELETE tenders that have been closed for more than
+    `days_after_closing` days. This is NOT called by default — by default the hub
+    keeps ALL historical data. Only call this if you explicitly want old data purged.
     Also deletes related source mappings for deleted tenders.
     Returns number of tenders deleted.
     """

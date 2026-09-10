@@ -1,7 +1,7 @@
 """
 Tenders.lk Private Aggregator Scraper
 Uses their official backend API - fastest, most complete source
-Total database: 166k+ tenders, we only scrape open/recent ones
+Collects the FULL history (old + new tenders), not just open/recent ones
 """
 from typing import List, Dict
 import re
@@ -86,6 +86,19 @@ class TendersLKScraper(BaseScraper):
                     return mapped
         return "other"
 
+    # Field-name candidates for published/closing dates. Tenders.lk's API schema
+    # has varied over time, so we check every plausible key instead of guessing one.
+    PUBLISHED_KEYS = [
+        'published_date', 'publishedDate', 'published_at', 'publishedAt',
+        'publish_date', 'publishDate', 'publish_at', 'publishAt',
+        'created_at', 'createdAt', 'created_date', 'createdDate',
+        'posted_date', 'postedDate', 'post_date', 'date',
+    ]
+    CLOSING_KEYS = [
+        'closing_date', 'closingDate', 'closed_date', 'closedDate',
+        'due_date', 'dueDate', 'deadline', 'end_date', 'endDate',
+    ]
+
     def extract_organization_from_title(self, title: str) -> str:
         """Try to extract organization name from tender title"""
         # Common patterns: "Ministry of X - Tender title", "Ceylon Electricity Board: IFB for..."
@@ -103,33 +116,29 @@ class TendersLKScraper(BaseScraper):
 
     def scrape(self) -> List[Dict]:
         tenders = []
-        # Scrape first 100 pages = last ~1500 tenders (covers ~3-4 months of open/new tenders)
-        # API returns 15 items per page; auto-stops when we hit old/expired tenders
-        max_pages = 100
-        old_tender_count = 0
+        # Collect the FULL history (old + new): paginate through every page until
+        # the API returns no more tenders. Closed/expired tenders are kept too.
+        from config import MAX_PAGES_PER_SITE
+        max_pages = MAX_PAGES_PER_SITE or 100000  # hard safety cap to avoid infinite loops
+        page = 1
 
-        for page in range(1, max_pages + 1):
+        while page <= max_pages:
             try:
                 url = f"{self.api_base}/api/tenders?page={page}&perPage=15"
                 resp = self.scraper.get(url, timeout=10)
                 if resp.status_code != 200:
-                    continue
+                    break  # error / rate-limited / end of data
                 data = resp.json()
                 items = data.get('data', [])
+                if not items:
+                    break  # no more results
                 self.tenders_found += len(items)
 
                 for item in items:
-                    # Skip if closing date already passed (closed tender)
-                    closing_date = item.get('closing_date')
-                    if closing_date:
-                        try:
-                            from datetime import date
-                            cd = date.fromisoformat(closing_date)
-                            if cd < date.today():
-                                old_tender_count +=1
-                                continue  # Skip old/expired tenders
-                        except Exception:
-                            pass
+                    # Robust date extraction — try every known field name so the
+                    # collected dates actually match what Tenders.lk shows.
+                    closing_date = self.pick_date(item, self.CLOSING_KEYS) or item.get('closing_date')
+                    published_date = self.pick_date(item, self.PUBLISHED_KEYS)
 
                     title = item.get('title', '').strip()
                     # Skip empty/supplier registration only notices
@@ -138,7 +147,6 @@ class TendersLKScraper(BaseScraper):
                     if 'supplier registration' in title.lower():
                         continue
 
-                    published_date = self.parse_date(item.get('published_date') or item.get('created_at'))
                     description = item.get('description', '')
                     # Clean HTML from description
                     if description:
@@ -174,6 +182,16 @@ class TendersLKScraper(BaseScraper):
 
                     org_name = self.extract_organization_from_title(title) or "Tenders.lk Listing"
 
+                    # Keep old/closed tenders too — just mark them accurately
+                    status = "open"
+                    if closing_date:
+                        try:
+                            from datetime import date
+                            cd = date.fromisoformat(str(closing_date)[:10])
+                            status = "closed" if cd < date.today() else "open"
+                        except Exception:
+                            status = "open"
+
                     tender = {
                         "source_site_id": self.site_id,
                         "source_id": f"tlk_{item.get('tender_code') or item.get('id')}",
@@ -186,16 +204,14 @@ class TendersLKScraper(BaseScraper):
                         "description": description,
                         "document_links": list(set(doc_links)),
                         "source_url": f"{self.base_url}/tender/{item.get('slug', item['id'])}",
-                        "status": "open",
+                        "status": status,
                     }
                     tenders.append(tender)
 
-                # If we hit 10+ old tenders in a row, stop pagination
-                if old_tender_count > 10:
-                    break
+                page += 1
 
             except Exception as e:
                 print(f"    Tenders.lk page {page} error: {e}")
-                continue
+                break
 
         return tenders

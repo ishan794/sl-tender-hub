@@ -26,8 +26,9 @@ class MahaweliScraper(BaseScraper):
                 contract_match = re.search(r'CONTRACT NO:?\s*([A-Z0-9\s\-/.]+)', text, re.IGNORECASE)
                 contract_no = contract_match.group(1).strip() if contract_match else None
 
-                # Try to extract date from PDF filename
-                date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', href)
+                # Try to extract a date from the PDF filename or link text.
+                # Mahaweli uses several naming conventions, so try them all.
+                date_match = re.search(r'(\d{1,2}[._-]\d{1,2}[._-]\d{2,4}|\d{4}[_-]\d{1,2}[_-]\d{1,2})', href + ' ' + text)
                 published_date = self.parse_date(date_match.group(1)) if date_match else None
 
                 # Categorize by contract prefix

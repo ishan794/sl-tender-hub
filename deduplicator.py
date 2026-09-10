@@ -4,6 +4,7 @@ Uses fuzzy matching of titles + contract numbers + organization to identify dupl
 RAM usage: <10MB, no ML/AI models required
 """
 import re
+from collections import defaultdict
 from urllib.parse import urlparse
 from typing import Dict, Optional, List
 
@@ -84,6 +85,9 @@ def find_matching_tender(new_tender: Dict, existing_tenders: List[Dict]) -> Opti
     1. Same contract number = 100% duplicate
     2. Same content hash = duplicate
     3. Title similarity > 0.85 = duplicate
+
+    NOTE: O(n) per call. For very large datasets use build_index() +
+    find_matching_tender_fast() instead.
     """
     new_contract = extract_contract_number(new_tender.get('title', ''))
     new_norm = normalize_text(new_tender.get('title', ''))
@@ -118,5 +122,123 @@ def find_matching_tender(new_tender: Dict, existing_tenders: List[Dict]) -> Opti
         if similarity > 0.85 and similarity > best_score:
             best_score = similarity
             best_match = existing['source_id']
+
+    return best_match
+
+
+def build_index(existing_tenders: List[Dict]) -> Dict:
+    """Precompute lookup structures so duplicate detection scales to 100k+ tenders.
+
+    Replaces the O(n) scan of find_matching_tender with:
+      - O(1) exact lookups (contract number, content hash)
+      - a token index that only fuzzy-compares against tenders sharing a
+        rare title token (instead of every tender).
+    """
+    by_contract = {}
+    by_hash = {}
+    token_index = defaultdict(set)
+    records = {}
+
+    for e in existing_tenders:
+        sid = e.get('source_id')
+        if not sid:
+            continue
+        title = e.get('title', '') or ''
+        org = e.get('organization', '') or ''
+        contract = extract_contract_number(title)
+        title_tokens = set(normalize_text(title).split())
+        org_tokens = set(normalize_text(org).split())
+        chash = get_content_hash(title, org)
+
+        records[sid] = {
+            'contract': contract,
+            'hash': chash,
+            'title_tokens': title_tokens,
+            'org_tokens': org_tokens,
+        }
+        if contract:
+            by_contract[contract] = sid
+        by_hash[chash] = sid
+        for tok in title_tokens:
+            token_index[tok].add(sid)
+
+    return {
+        'by_contract': by_contract,
+        'by_hash': by_hash,
+        'token_index': token_index,
+        'records': records,
+    }
+
+
+def index_add(index: Dict, tender: Dict) -> None:
+    """Register a newly-inserted tender in an existing index."""
+    sid = tender.get('source_id')
+    if not sid:
+        return
+    title = tender.get('title', '') or ''
+    org = tender.get('organization', '') or ''
+    contract = extract_contract_number(title)
+    title_tokens = set(normalize_text(title).split())
+    org_tokens = set(normalize_text(org).split())
+    chash = get_content_hash(title, org)
+
+    index['records'][sid] = {
+        'contract': contract,
+        'hash': chash,
+        'title_tokens': title_tokens,
+        'org_tokens': org_tokens,
+    }
+    if contract:
+        index['by_contract'][contract] = sid
+    index['by_hash'][chash] = sid
+    for tok in title_tokens:
+        index['token_index'][tok].add(sid)
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union > 0 else 0.0
+
+
+def find_matching_tender_fast(new_tender: Dict, index: Dict) -> Optional[str]:
+    """Indexed equivalent of find_matching_tender (same rules, near O(1) per call)."""
+    title = new_tender.get('title', '') or ''
+    org = new_tender.get('organization', '') or ''
+
+    new_contract = extract_contract_number(title)
+    new_hash = get_content_hash(title, org)
+    new_title_tokens = set(normalize_text(title).split())
+    new_org_tokens = set(normalize_text(org).split())
+
+    # 1. Contract number exact match
+    if new_contract and new_contract in index['by_contract']:
+        return index['by_contract'][new_contract]
+
+    # 2. Content hash match
+    if new_hash in index['by_hash']:
+        return index['by_hash'][new_hash]
+
+    # 3. Fuzzy title similarity - only compare against tenders sharing a rare
+    #    title token. A true >0.85 match shares most tokens, including rare ones.
+    rare_tokens = sorted(new_title_tokens, key=lambda t: len(index['token_index'].get(t, ())))[:5]
+    candidates = set()
+    for tok in rare_tokens:
+        candidates |= index['token_index'].get(tok, set())
+
+    best_match = None
+    best_score = 0.0
+    for sid in candidates:
+        rec = index['records'][sid]
+        # Skip different organizations entirely
+        if new_org_tokens and rec['org_tokens']:
+            if _jaccard(new_org_tokens, rec['org_tokens']) < 0.2:
+                continue
+        similarity = _jaccard(new_title_tokens, rec['title_tokens'])
+        if similarity > 0.85 and similarity > best_score:
+            best_score = similarity
+            best_match = sid
 
     return best_match

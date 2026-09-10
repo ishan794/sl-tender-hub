@@ -40,9 +40,12 @@ class SmartTendersScraper(BaseScraper):
 
     def scrape(self) -> List[Dict]:
         tenders = []
-        max_pages = 6  # 60 fresh tenders per run
-        
-        for page in range(1, max_pages + 1):
+        # Collect the FULL history: paginate until the API returns no more tenders.
+        from config import MAX_PAGES_PER_SITE
+        max_pages = MAX_PAGES_PER_SITE or 100000  # safety cap
+        page = 1
+
+        while page <= max_pages:
             try:
                 r = requests.get(f"{self.api_url}?page={page}", headers=self.headers, timeout=12)
                 if r.status_code != 200:
@@ -51,7 +54,7 @@ class SmartTendersScraper(BaseScraper):
                 t_list = data.get('data', {}).get('tenders', {}).get('data', [])
                 if not t_list:
                     break
-                    
+
                 for t in t_list:
                     title = (t.get('title') or '').strip()
                     if not title:
@@ -77,9 +80,17 @@ class SmartTendersScraper(BaseScraper):
                         doc_links.append(t['english_tender_url'])
                     if t.get('sinhala_tender_url'):
                         doc_links.append(t['sinhala_tender_url'])
-                        
-                    source_url = f"{self.base_url}/tenders"
-                    
+
+                    # Keep old/closed tenders too — just mark them accurately
+                    status = "open"
+                    if due_date:
+                        try:
+                            from datetime import date
+                            cd = date.fromisoformat(str(due_date)[:10])
+                            status = "closed" if cd < date.today() else "open"
+                        except Exception:
+                            status = "open"
+
                     tenders.append({
                         'source_site_id': self.site_id,
                         'source_id': f"st_{code}",
@@ -103,12 +114,15 @@ class SmartTendersScraper(BaseScraper):
                         'pre_bid_meeting': None,
                         'document_links': doc_links,
                         'source_url': f"https://smarttenders.lk/tender/{code}",
-                        'status': 'open'
+                        'status': status
                     })
+
+                page += 1
+
             except Exception as e:
                 print(f"[SmartTenders] Error page {page}: {e}")
                 break
-                
+
         self.tenders_found = len(tenders)
-        print(f"[{self.site_name}] Scraped {len(tenders)} live tenders")
+        print(f"[{self.site_name}] Scraped {len(tenders)} tenders (full history)")
         return tenders

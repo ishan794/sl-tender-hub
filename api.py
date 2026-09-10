@@ -19,13 +19,20 @@ try:
     from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse, Response, HTMLResponse, PlainTextResponse
+    from fastapi.staticfiles import StaticFiles
 except ImportError:
     print("FastAPI not installed. Install API dependencies with: pip install fastapi uvicorn")
     exit(1)
 
 
 from typing import Optional, List
-from database import init_db, get_tenders, get_statistics, get_tender_sources, mark_expired_tenders
+import base64
+import hashlib
+import os
+import re
+from datetime import date, datetime
+from database import init_db, get_tenders, get_statistics, get_tender_sources, mark_expired_tenders, insert_submitted_tender
+from config import UPLOAD_DIR
 from sources import ALL_SOURCES, get_source
 from pydantic import BaseModel
 from seo import (
@@ -58,12 +65,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Serve uploaded notice images (manual submissions)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
 class TenderResponse(BaseModel):
     total: int
     page: int
     total_pages: int
     limit: int
     results: List[dict]
+
+# ==========================================
+# MANUAL TENDER SUBMISSION (POST)
+# ==========================================
+class SubmitTender(BaseModel):
+    title: str                                    # notice title (required)
+    organization: Optional[str] = None            # Company / issuing authority
+    category: Optional[str] = "other"             # construction/goods/services/IT/... or free text
+    source: Optional[str] = None                  # where it was published, e.g. "Sunday Observer"
+    location: Optional[str] = None                # e.g. "Western Province, Gampaha"
+    published_date: Optional[str] = None          # YYYY-MM-DD
+    closing_date: Optional[str] = None            # YYYY-MM-DD
+    description: Optional[str] = None
+    notice_image: Optional[str] = None            # image URL or base64 data-URL of the notice
+
+def _slugify(value: str) -> str:
+    """Turn a source name into a safe source_site_id, e.g. 'Sunday Observer' -> 'sunday_observer'."""
+    slug = re.sub(r'[^a-zA-Z0-9]+', '_', (value or '').lower()).strip('_')
+    return slug or 'user_submission'
+
+def _parse_date_str(value: Optional[str]):
+    """Parse a date string into a date object. Accepts YYYY-MM-DD and DD/MM/YYYY style."""
+    if not value:
+        return None
+    value = value.strip()
+    for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y', '%d %B %Y', '%d %b %Y'):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+def _save_notice_image(data_or_url: Optional[str], tender_key: str) -> Optional[str]:
+    """Save a notice image. Accepts a URL or a base64 data-URL; returns the stored path/URL."""
+    if not data_or_url:
+        return None
+    data_or_url = data_or_url.strip()
+    if data_or_url.startswith(('http://', 'https://')):
+        return data_or_url
+    m = re.match(r'data:image/([a-zA-Z0-9]+);base64,(.*)', data_or_url, re.DOTALL)
+    if m:
+        ext = m.group(1).lower()
+        if ext == 'jpeg':
+            ext = 'jpg'
+        filename = f"notice_{tender_key}.{ext}"
+        with open(os.path.join(UPLOAD_DIR, filename), 'wb') as f:
+            f.write(base64.b64decode(m.group(2)))
+        return f"/uploads/{filename}"
+    return data_or_url  # unknown format — store as-is
 
 @app.on_event("startup")
 def startup():
@@ -85,6 +145,7 @@ def root():
         "status": "running",
         "endpoints": {
             "GET /api/tenders": "Search/list tenders with filters",
+            "POST /api/tenders": "Submit a tender notice manually (with notice image)",
             "GET /api/tenders/{master_group_id}": "Get single tender details",
             "GET /api/tenders/{master_group_id}/seo": "Get full SEO meta tags + JSON-LD schema for a tender page",
             "GET /api/seo/home": "Homepage SEO metadata",
@@ -144,6 +205,71 @@ def list_tenders(
         t['seo_slug'] = get_tender_url(t).split('/')[-1]
         t['category_url'] = get_category_url(t.get('category', 'other'))
     return result
+
+@app.post("/api/tenders", tags=["Tenders"], status_code=201, summary="Submit a tender notice manually")
+def submit_tender(payload: SubmitTender):
+    """
+    Submit a tender notice manually (e.g. a newspaper ad from Sunday Observer).
+    Supports all the fields shown on a notice: Company, Category, Source,
+    Location, Published Date, Closing Date + a notice image (URL or base64).
+
+    Dates are validated: published date cannot be after closing date.
+    A tender whose closing date has already passed is stored as 'closed'.
+    """
+    title = (payload.title or '').strip()
+    if len(title) < 10:
+        raise HTTPException(status_code=422, detail="Title is required (at least 10 characters)")
+
+    published = _parse_date_str(payload.published_date)
+    closing = _parse_date_str(payload.closing_date)
+
+    # Reject impossible dates (e.g. published 30 Sep 2026 but closing 7 Sep 2026)
+    if published and closing and published > closing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid dates: published date ({published.isoformat()}) cannot be after closing date ({closing.isoformat()})"
+        )
+
+    # Auto-mark as closed if the closing date has already passed
+    status = "open"
+    today = date.today()
+    if closing and closing < today:
+        status = "closed"
+
+    source_name = (payload.source or 'User Submission').strip()
+    source_site_id = _slugify(source_name)
+    source_id = f"submit_{hashlib.md5((title + (payload.published_date or '') + (payload.closing_date or '')).encode()).hexdigest()[:10]}"
+
+    notice_image = _save_notice_image(payload.notice_image, source_id)
+
+    tender = {
+        "source_site_id": source_site_id,
+        "source_id": source_id,
+        "title": title,
+        "organization": payload.organization,
+        "category": (payload.category or 'other').strip().lower(),
+        "published_date": published.isoformat() if published else None,
+        "closing_date": closing.isoformat() if closing else None,
+        "location": payload.location,
+        "description": payload.description,
+        "document_links": [],
+        "source_url": f"user-submitted://{source_site_id}/{source_id}",
+        "status": status,
+        "notice_image": notice_image,
+        "source_name": source_name,
+    }
+
+    master_group_id = insert_submitted_tender(tender)
+    if not master_group_id:
+        raise HTTPException(status_code=409, detail="This tender already exists")
+
+    return {
+        "created": True,
+        "master_group_id": master_group_id,
+        "source_id": source_id,
+        "status": status,
+        "notice_image": notice_image,
+    }
 
 @app.get("/api/tenders/{master_group_id}", tags=["Tenders"])
 def get_tender_detail(master_group_id: str):

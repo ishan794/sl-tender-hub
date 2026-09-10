@@ -182,9 +182,47 @@ class GenericScraper(BaseScraper):
 
         return details
 
+    def _collect_page_links(self, soup, base_url: str) -> List[tuple]:
+        """Find all tender-looking links on a listing page (deduplicated)."""
+        links = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            text = a.get_text(' ', strip=True)
+            if not text or len(text) < MIN_TITLE_LENGTH:
+                continue
+            # Filter junk URLs
+            if any(x in href.lower() for x in ['javascript:', '#', 'mailto:', 'login', 'register']):
+                continue
+            if self.is_valid_tender(text, href):
+                full_url = urljoin(base_url, href)
+                if full_url not in self._seen_urls:
+                    self._seen_urls.add(full_url)
+                    links.append((text.strip(), full_url))
+        return links
+
+    def _pagination_urls(self, base_url: str, page: int) -> List[str]:
+        """Candidate URLs for the nth page of a listing (WordPress/Joomla/plain)."""
+        if page <= 1:
+            return [base_url]
+        variants = []
+        if self.strategy == "joomla":
+            variants.append(f"{base_url}{'&' if '?' in base_url else '?'}start={(page - 1) * 10}")
+        if '?' in base_url:
+            variants.append(f"{base_url}&page={page}")
+            variants.append(f"{base_url}&paged={page}")
+        else:
+            variants.append(f"{base_url}?page={page}")
+            variants.append(f"{base_url}?paged={page}")
+            variants.append(base_url.rstrip('/') + f"/page/{page}/")
+        return variants
+
     def scrape(self) -> List[Dict]:
         tenders = []
-        seen_urls = set()
+        self._seen_urls = set()
+
+        from config import MAX_PAGES_PER_SITE, MAX_TENDERS_PER_SITE
+        max_pages = MAX_PAGES_PER_SITE or 200  # listing-pagination safety cap
+        max_tenders = MAX_TENDERS_PER_SITE  # None = collect everything
 
         # Try common tender page URL patterns if direct page fails
         urls_to_try = [self.tender_url]
@@ -195,102 +233,125 @@ class GenericScraper(BaseScraper):
                             '/tender', '/notice/tenders', '/procurement-notices']
             urls_to_try = [urljoin(self.base_url, path) for path in common_paths]
 
-        for url in urls_to_try:
+        for base_url in urls_to_try:
             try:
-                soup = self.fetch_page(url)
-                if not soup:
-                    continue
-                current_url = url
+                page = 1
+                empty_pages = 0
 
-                # Find all links that look like tenders
-                tender_links = []
-                for a in soup.find_all('a', href=True):
-                    href = a['href']
-                    text = a.get_text(' ', strip=True)
-                    if not text or len(text) < MIN_TITLE_LENGTH:
+                while page <= max_pages:
+                    # Resolve this listing page (try pagination variants in order)
+                    soup = None
+                    current_url = base_url
+                    for candidate in self._pagination_urls(base_url, page):
+                        soup = self.fetch_page(candidate)
+                        if soup:
+                            current_url = candidate
+                            break
+                    if not soup:
+                        break
+
+                    tender_links = self._collect_page_links(soup, current_url)
+                    self.tenders_found += len(tender_links)
+
+                    if not tender_links:
+                        empty_pages += 1
+                        if empty_pages >= 2:  # two empty pages in a row => end of listings
+                            break
+                        page += 1
                         continue
-                    # Filter junk URLs
-                    if any(x in href.lower() for x in ['javascript:', '#', 'mailto:', 'login', 'register']):
-                        continue
-                    if self.is_valid_tender(text, href):
-                        full_url = urljoin(current_url, href)
-                        if full_url not in seen_urls:
-                            tender_links.append((text.strip(), full_url))
-                            seen_urls.add(full_url)
+                    empty_pages = 0
 
-                self.tenders_found += len(tender_links)
-
-                for title, detail_url in tender_links[:30]:  # Limit to 30 latest per site per run
-                    published_date = None
-                    closing_date = None
-                    doc_links = []
-                    extra_details = {}
-
-                    # Clean title (remove extra whitespace/newlines)
-                    title = re.sub(r'\s+', ' ', title).strip()[:MAX_TITLE_LENGTH]
-
-                    # For direct PDF links - don't fetch detail page
-                    if detail_url.lower().endswith(('.pdf', '.doc', '.docx')):
-                        doc_links = [detail_url]
-                        # Try to extract date from URL path
-                        date_match = re.search(r'/(\d{4})/(\d{2})/', detail_url)
-                        if date_match:
-                            published_date = f"{date_match.group(1)}-{date_match.group(2)}-01"
+                    if max_tenders is not None:
+                        remaining = tender_links[:max_tenders - len(tenders)]
                     else:
-                        # Fetch detail page for full information
-                        try:
-                            detail_soup = self.fetch_page(detail_url)
-                            if detail_soup:
-                                full_text = detail_soup.get_text(' ', strip=True)
-                                full_text = re.sub(r'\s+', ' ', full_text)
+                        remaining = tender_links
 
-                                # Extract all detailed fields
-                                extra_details = self.extract_details_from_page(detail_soup, full_text)
-                                published_date = extra_details.pop('published_date', None)
-                                closing_date = extra_details.pop('closing_date', None)
+                    for title, detail_url in remaining:
+                        published_date = None
+                        closing_date = None
+                        doc_links = []
+                        extra_details = {}
 
-                                # Extract all document links (PDF/DOC/XLSX)
-                                for a in detail_soup.find_all('a', href=True):
-                                    dhref = a['href']
-                                    if dhref.lower().endswith(('.pdf', '.doc', '.docx', '.xlsx', '.zip')):
-                                        full_doc_url = urljoin(detail_url, dhref)
-                                        doc_links.append(full_doc_url)
+                        # Clean title (remove extra whitespace/newlines)
+                        title = re.sub(r'\s+', ' ', title).strip()[:MAX_TITLE_LENGTH]
 
-                                # Get better title from detail page if available
-                                h1 = detail_soup.find(['h1', 'h2'], class_=re.compile(r'title|heading', re.I))
-                                if not h1:
-                                    h1 = detail_soup.find('h1')
-                                if h1:
-                                    h1_text = h1.get_text(' ', strip=True)
-                                    if MIN_TITLE_LENGTH < len(h1_text) < MAX_TITLE_LENGTH:
-                                        # Make sure it's actually a tender
-                                        if self.is_valid_tender(h1_text):
-                                            title = h1_text
-                        except Exception:
-                            pass
+                        # For direct PDF links - don't fetch detail page
+                        if detail_url.lower().endswith(('.pdf', '.doc', '.docx')):
+                            doc_links = [detail_url]
+                            # Try to extract date from URL path
+                            date_match = re.search(r'/(\d{4})/(\d{2})/', detail_url)
+                            if date_match:
+                                published_date = f"{date_match.group(1)}-{date_match.group(2)}-01"
+                        else:
+                            # Fetch detail page for full information
+                            try:
+                                detail_soup = self.fetch_page(detail_url)
+                                if detail_soup:
+                                    full_text = detail_soup.get_text(' ', strip=True)
+                                    full_text = re.sub(r'\s+', ' ', full_text)
 
-                    # Generate unique ID from URL
-                    import hashlib
-                    source_id = f"{self.site_id}_{hashlib.md5(detail_url.encode()).hexdigest()[:10]}"
+                                    # Extract all detailed fields
+                                    extra_details = self.extract_details_from_page(detail_soup, full_text)
+                                    published_date = extra_details.pop('published_date', None)
+                                    closing_date = extra_details.pop('closing_date', None)
 
-                    tender = {
-                        "source_site_id": self.site_id,
-                        "source_id": source_id,
-                        "title": title,
-                        "organization": self.site_name,
-                        "published_date": published_date,
-                        "closing_date": closing_date,
-                        "location": "Sri Lanka",
-                        "category": self.categorize(title + " " + str(extra_details.get('description', ''))),
-                        "document_links": list(set(doc_links)),
-                        "source_url": detail_url,
-                        "status": "open",
-                        **extra_details
-                    }
-                    tenders.append(tender)
+                                    # Extract all document links (PDF/DOC/XLSX)
+                                    for a in detail_soup.find_all('a', href=True):
+                                        dhref = a['href']
+                                        if dhref.lower().endswith(('.pdf', '.doc', '.docx', '.xlsx', '.zip')):
+                                            full_doc_url = urljoin(detail_url, dhref)
+                                            doc_links.append(full_doc_url)
+
+                                    # Get better title from detail page if available
+                                    h1 = detail_soup.find(['h1', 'h2'], class_=re.compile(r'title|heading', re.I))
+                                    if not h1:
+                                        h1 = detail_soup.find('h1')
+                                    if h1:
+                                        h1_text = h1.get_text(' ', strip=True)
+                                        if MIN_TITLE_LENGTH < len(h1_text) < MAX_TITLE_LENGTH:
+                                            # Make sure it's actually a tender
+                                            if self.is_valid_tender(h1_text):
+                                                title = h1_text
+                            except Exception:
+                                pass
+
+                        # Mark old/closed tenders accurately instead of dropping them
+                        status = "open"
+                        if closing_date:
+                            try:
+                                from datetime import date
+                                cd = date.fromisoformat(str(closing_date)[:10])
+                                status = "closed" if cd < date.today() else "open"
+                            except Exception:
+                                status = "open"
+
+                        # Generate unique ID from URL
+                        import hashlib
+                        source_id = f"{self.site_id}_{hashlib.md5(detail_url.encode()).hexdigest()[:10]}"
+
+                        tender = {
+                            "source_site_id": self.site_id,
+                            "source_id": source_id,
+                            "title": title,
+                            "organization": self.site_name,
+                            "published_date": published_date,
+                            "closing_date": closing_date,
+                            "location": "Sri Lanka",
+                            "category": self.categorize(title + " " + str(extra_details.get('description', ''))),
+                            "document_links": list(set(doc_links)),
+                            "source_url": detail_url,
+                            "status": status,
+                            **extra_details
+                        }
+                        tenders.append(tender)
+
+                    if max_tenders is not None and len(tenders) >= max_tenders:
+                        break
+
+                    page += 1
 
                 if tenders:
-                    break  # Got results from this URL, no need to try other paths
+                    break  # Got results from this URL pattern, no need to try other paths
             except Exception:
                 continue
 
