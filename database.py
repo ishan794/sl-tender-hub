@@ -51,6 +51,18 @@ def init_db():
     )
     ''')
 
+    # Migrations for databases created before these columns existed.
+    # SQLite's CREATE TABLE IF NOT EXISTS does NOT add columns to an existing table,
+    # so we add new columns here explicitly.
+    for column, column_type in [
+        ("notice_image", "TEXT"),  # photo/scan of the notice (manual submissions)
+        ("source_name", "TEXT"),   # human-readable source, e.g. "Sunday Observer"
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE tenders ADD COLUMN {column} {column_type}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     # Cross-site source links (one tender appearing on multiple sites)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS tender_sources (
@@ -128,8 +140,9 @@ def insert_tender(tender_data: Dict, master_group_id: str = None, is_primary: bo
             closing_date, location, category, estimated_value, currency, description,
             eligibility, bid_bond, contact_person, contact_email, contact_phone,
             collection_address, submission_address, document_fee, pre_bid_meeting,
-            document_links, source_url, status, is_primary, duplicate_of
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            document_links, source_url, status, is_primary, duplicate_of,
+            notice_image, source_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             tender_data['source_site_id'],
             tender_data['source_id'],
@@ -156,7 +169,9 @@ def insert_tender(tender_data: Dict, master_group_id: str = None, is_primary: bo
             tender_data['source_url'],
             tender_data.get('status', 'open'),
             is_primary,
-            duplicate_of
+            duplicate_of,
+            tender_data.get('notice_image'),
+            tender_data.get('source_name')
         ))
 
         # Add source mapping
@@ -172,6 +187,18 @@ def insert_tender(tender_data: Dict, master_group_id: str = None, is_primary: bo
         return False
     finally:
         conn.close()
+
+def insert_submitted_tender(tender_data: Dict) -> Optional[str]:
+    """
+    Insert a manually submitted tender (dates already validated by the API layer).
+    Returns the new master_group_id on success, or None if the tender already exists.
+    """
+    import hashlib
+    master_id = hashlib.md5(tender_data['source_url'].encode()).hexdigest()[:12]
+    if insert_tender(tender_data, master_group_id=master_id, is_primary=1):
+        return master_id
+    return None
+
 
 def add_duplicate_source(master_group_id: str, source_site_id: str, source_id: str, source_url: str):
     """Register that an existing tender also appears on another site (cross-site duplicate)"""

@@ -8,6 +8,9 @@ BASE_DIR = Path(__file__).parent.resolve()
 # All tender data will be saved to this file
 DB_PATH = os.getenv("TENDER_DB_PATH", BASE_DIR / "tenders.db")
 
+# Folder where uploaded notice images (manual submissions) are stored
+UPLOAD_DIR = Path(os.getenv("TENDER_UPLOAD_DIR", BASE_DIR / "uploads"))
+
 # Scraper settings
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 REQUEST_TIMEOUT = 8  # seconds - reduced for faster runs
